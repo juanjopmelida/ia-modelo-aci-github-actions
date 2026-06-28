@@ -1,0 +1,333 @@
+# This is a basic workflow name: CI/CD Modelo IA FastAPI - ACR + ACI 
+ on:   push:     branches: ["main"]   workflow_dispatch: 
+ permissions: 
+  contents: read 
+ env: 
+  # ========================================================= 
+  # Configuración general de la práctica 
+  # =========================================================   LOCATION: westeurope 
+ 
+  # Imagen Docker que se construirá y publicará en ACR   IMAGE_NAME: iris-api 
+ 
+  # Azure Container Instance que expondrá la API 
+  CONTAINER_NAME: aci-modelo-iris-api 
+ 
+  # Puerto interno y externo de FastAPI / Uvicorn 
+  PORT: 8000 
+ 
+  # ========================================================= 
+  # Valores leídos desde GitHub Secrets 
+  # =========================================================   RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }} 
+ 
+  ACR_NAME: ${{ secrets.ACR_NAME }} 
+  REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }} 
+  REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}   REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}  
+  DNS_LABEL: ${{ secrets.DNS_LABEL }}  
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}   AZURE_BEARER_TOKEN: ${{ secrets.AZURE_BEARER_TOKEN }} 
+ jobs:   build-test-push-deploy:     name: Build, test, push and deploy to ACI 
+    runs-on: ubuntu-latest     timeout-minutes: 25 
+     steps: 
+      # --------------------------------------------------------- 
+      # 1. Descargar código del repositorio 
+      # --------------------------------------------------------- 
+-	name: Checkout repository         uses: actions/checkout@v4 
+ 
+      # --------------------------------------------------------- 
+      # 2. Preparar Python 
+      # --------------------------------------------------------- 
+-	name: Set up Python         uses: actions/setup-python@v5         with:           python-version: "3.11" 
+ 
+      # --------------------------------------------------------- 
+      # 3. Instalar dependencias Python 
+      # --------------------------------------------------------- 
+-	name: Install Python dependencies         run: | 
+          python -m pip install --upgrade pip           python -m pip install -r requirements.txt           python -m pip install pytest 
+ 
+      # --------------------------------------------------------- 
+      # 4. Entrenar y guardar el modelo 
+      # --------------------------------------------------------- 
+-	name: Train and save model         run: | 
+          python app/train_model.py           echo "Contenido de app/model:"           ls -la app/model 
+ 
+      # --------------------------------------------------------- 
+      # 5. Ejecutar tests 
+      # --------------------------------------------------------- 
+-	name: Run unit tests with pytest         run: | 
+          python -m pytest -q 
+ 
+      # --------------------------------------------------------- 
+      # 6. Validar secrets necesarios 
+      # --------------------------------------------------------- 
+-	name: Validate required secrets         run: | 
+          echo "Validando variables necesarias..." 
+ 
+          if [ -z "$RESOURCE_GROUP" ]; then             echo "ERROR: RESOURCE_GROUP está vacío"             exit 1           fi 
+ 
+          if [ -z "$ACR_NAME" ]; then             echo "ERROR: ACR_NAME está vacío"             exit 1           fi 
+ 
+          if [ -z "$REGISTRY_LOGIN_SERVER" ]; then             echo "ERROR: REGISTRY_LOGIN_SERVER está vacío"             exit 1           fi 
+ 
+          if [ -z "$REGISTRY_USERNAME" ]; then             echo "ERROR: REGISTRY_USERNAME está vacío"             exit 1           fi 
+ 
+          if [ -z "$REGISTRY_PASSWORD" ]; then             echo "ERROR: REGISTRY_PASSWORD está vacío"             exit 1           fi 
+           if [ -z "$DNS_LABEL" ]; then             echo "ERROR: DNS_LABEL está vacío"             exit 1           fi  
+          if [ -z "$AZURE_SUBSCRIPTION_ID" ]; then             echo "ERROR: AZURE_SUBSCRIPTION_ID está vacío"             exit 1 
+          fi 
+ 
+          if [ -z "$AZURE_BEARER_TOKEN" ]; then             echo "ERROR: AZURE_BEARER_TOKEN está vacío"             exit 1           fi 
+ 
+          if [[ "$AZURE_BEARER_TOKEN" == Bearer* ]]; then 
+            echo "ERROR: AZURE_BEARER_TOKEN no debe empezar por Bearer. El YAML ya añade Bearer en la cabecera 
+HTTP." 
+            exit 1           fi 
+ 
+          echo "Variables validadas correctamente." 
+ 
+      # --------------------------------------------------------- 
+      # 7. Login en Azure Container Registry 
+      # --------------------------------------------------------- 
+-	name: Login to Azure Container Registry         run: | 
+          echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY_LOGIN_SERVER" \ 
+            --username "$REGISTRY_USERNAME" \ 
+            --password-stdin 
+ 
+      # ---------------------------------------------------------       # 8. Construir imagen Docker 
+      # --------------------------------------------------------- 
+-	name: Build Docker image 
+        run: |           docker build -t "$IMAGE_NAME:local" . 
+ 
+      # --------------------------------------------------------- 
+      # 9. Probar contenedor localmente en GitHub Actions 
+      # --------------------------------------------------------- 
+-	name: Smoke test Docker container         run: | 
+          docker rm -f iris-api-test || true 
+ 
+          docker run -d \ 
+            --name iris-api-test \ 
+            -p "${PORT}:${PORT}" \ 
+            "$IMAGE_NAME:local" 
+ 
+          echo "Esperando a que arranque el contenedor local..."           sleep 15 
+ 
+          echo "Logs del contenedor local:"           docker logs iris-api-test 
+ 
+          echo "Probando /health local..." 
+          curl --fail --connect-timeout 5 --max-time 10 "http://localhost:${PORT}/health" 
+ 
+          echo "Probando /docs local..." 
+          curl --fail --connect-timeout 5 --max-time 10 "http://localhost:${PORT}/docs" 
+           docker stop iris-api-test           docker rm iris-api-test 
+ 
+      # --------------------------------------------------------- 
+      # 10. Etiquetar y subir imagen a ACR 
+      # --------------------------------------------------------- 
+      - name: Tag and push image to ACR         run: | 
+          IMAGE_SHA="${REGISTRY_LOGIN_SERVER}/${IMAGE_NAME}:${GITHUB_SHA}" 
+          IMAGE_LATEST="${REGISTRY_LOGIN_SERVER}/${IMAGE_NAME}:latest" 
+           docker tag "$IMAGE_NAME:local" "$IMAGE_SHA"           docker tag "$IMAGE_NAME:local" "$IMAGE_LATEST" 
+ 
+          docker push "$IMAGE_SHA"           docker push "$IMAGE_LATEST" 
+           echo "IMAGE_SHA=$IMAGE_SHA" >> "$GITHUB_ENV"           echo "IMAGE_LATEST=$IMAGE_LATEST" >> "$GITHUB_ENV"       # --------------------------------------------------------- 
+      # 11. Eliminar ACI anterior mediante Azure Management API 
+      # ---------------------------------------------------------       - name: Delete previous Azure Container Instance if exists         run: |           
+ACI_URL="https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/pro
+viders/Microsoft.ContainerInstance/containerGroups/${CONTAINER_NAME}?api-version=2023-05-01" 
+ 
+          echo "Eliminando ACI anterior si existe..." 
+ 
+          HTTP_CODE=$(curl -sS -o delete_response.json -w "%{http_code}" \             -X DELETE "$ACI_URL" \ 
+            -H "Authorization: Bearer ${AZURE_BEARER_TOKEN}" || echo "000") 
+ 
+          echo "Código HTTP delete: $HTTP_CODE" 
+ 
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "202" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = 
+"404" ]; then 
+            echo "Delete correcto o ACI inexistente."           else 
+            echo "Error eliminando ACI anterior."             cat delete_response.json || true             exit 1           fi 
+ 
+          echo "Esperando 30 segundos para liberar el nombre del contenedor..."           sleep 30 
+ 
+      # --------------------------------------------------------- 
+      # 12. Generar JSON de despliegue de ACI 
+      # --------------------------------------------------------- 
+      - name: Generate ACI deployment JSON         run: | 
+          python - <<'PY'           import json           import os 
+ 
+          port = int(os.environ["PORT"]) 
+ 
+          deployment = { 
+              "location": os.environ["LOCATION"], 
+              "properties": { 
+                  "containers": [ 
+                      { 
+                          "name": os.environ["CONTAINER_NAME"], 
+                          "properties": { 
+                              "image": os.environ["IMAGE_LATEST"], 
+                              "ports": [ 
+                                  { 
+                                      "port": port, 
+                                      "protocol": "TCP" 
+                                  } 
+                              ], 
+                              "environmentVariables": [], 
+                              "resources": { 
+                                  "requests": { 
+                                      "cpu": 1.0, 
+                                      "memoryInGB": 1.0 
+                                  } 
+                              } 
+                          } 
+                      } 
+                  ], 
+                  "imageRegistryCredentials": [ 
+                      { 
+                          "server": os.environ["REGISTRY_LOGIN_SERVER"], 
+                          "username": os.environ["REGISTRY_USERNAME"], 
+                          "password": os.environ["REGISTRY_PASSWORD"] 
+                      } 
+                  ], 
+                  "osType": "Linux", 
+                  "restartPolicy": "Always", 
+ 
+                  "ipAddress": { 
+                      "type": "Public", 
+                      "ports": [ 
+                          { 
+                              "port": port, 
+                              "protocol": "TCP" 
+                          } 
+                      ], 
+                      "dnsNameLabel": os.environ["DNS_LABEL"] 
+                  } 
+              } 
+          } 
+           with open("deployment.json", "w", encoding="utf-8") as f:               json.dump(deployment, f, indent=2) 
+ 
+          print("deployment.json generado correctamente.")           PY 
+ 
+      # --------------------------------------------------------- 
+      # 13. Desplegar ACI mediante Azure Management API 
+      # ---------------------------------------------------------       - name: Deploy to Azure Container Instances via REST         run: | 
+          
+ACI_URL="https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/pro viders/Microsoft.ContainerInstance/containerGroups/${CONTAINER_NAME}?api-version=2023-05-01" 
+ 
+          echo "Desplegando ACI mediante Azure Management API..."  
+          HTTP_CODE=$(curl -sS -o deploy_response.json -w "%{http_code}" \ 
+            -X PUT "$ACI_URL" \ 
+            -H "Authorization: Bearer ${AZURE_BEARER_TOKEN}" \ 
+            -H "Content-Type: application/json" \ 
+            --data-binary @deployment.json || echo "000") 
+ 
+          echo "Código HTTP deploy: $HTTP_CODE" 
+ 
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "202" ]; then             echo "Solicitud de despliegue enviada correctamente."           else 
+            echo "Error desplegando ACI."             cat deploy_response.json || true             exit 1           fi 
+ 
+      # --------------------------------------------------------- 
+      # 14. Esperar a que ACI quede provisionado 
+      # --------------------------------------------------------- 
+      - name: Wait for ACI provisioning         run: | 
+          
+ACI_URL="https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/pro viders/Microsoft.ContainerInstance/containerGroups/${CONTAINER_NAME}?api-version=2023-05-01" 
+ 
+          echo "Esperando a que ACI quede en estado Succeeded..." 
+ 
+          for i in {1..30}; do 
+            echo "Comprobación de provisioning $i de 30..."  
+            HTTP_CODE=$(curl -sS -o aci_status.json -w "%{http_code}" \ 
+              -X GET "$ACI_URL" \ 
+              -H "Authorization: Bearer ${AZURE_BEARER_TOKEN}" || echo "000") 
+             if [ "$HTTP_CODE" = "200" ]; then               PROVISIONING_STATE=$(python - <<'PY'           import json           with open("aci_status.json", "r", encoding="utf-8") as f: 
+              data = json.load(f) 
+          print(data.get("properties", {}).get("provisioningState", "")) 
+          PY 
+              )  
+              echo "ProvisioningState: $PROVISIONING_STATE" 
+              if [ "$PROVISIONING_STATE" = "Succeeded" ]; then                 echo "ACI provisionado correctamente."                 exit 0               fi                if [ "$PROVISIONING_STATE" = "Failed" ]; then                 echo "ACI ha fallado durante el provisioning."                 cat aci_status.json                 exit 1               fi 
+            else 
+              echo "No se pudo consultar ACI todavía. HTTP: $HTTP_CODE"             fi 
+             sleep 10           done 
+ 
+          echo "ACI no llegó a estado Succeeded a tiempo."           cat aci_status.json || true           exit 1 
+ 
+      # --------------------------------------------------------- 
+      # 15. Esperar y probar endpoint desplegado 
+      # --------------------------------------------------------- 
+      - name: Wait and test deployed ACI endpoint         run: | 
+          
+ACI_URL="https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/pro viders/Microsoft.ContainerInstance/containerGroups/${CONTAINER_NAME}?api-version=2023-05-01" 
+ 
+          echo "Obteniendo FQDN real de ACI desde Azure..." 
+ 
+          curl -sS -o aci_final.json \ 
+            -X GET "$ACI_URL" \ 
+            -H "Authorization: Bearer ${AZURE_BEARER_TOKEN}"  
+          FQDN=$(python - <<'PY'           import json           with open("aci_final.json", "r", encoding="utf-8") as f:               data = json.load(f) 
+          print(data.get("properties", {}).get("ipAddress", {}).get("fqdn", "")) 
+          PY 
+          ) 
+ 
+          if [ -z "$FQDN" ]; then 
+            echo "ERROR: No se ha obtenido FQDN desde ACI."             cat aci_final.json || true             exit 1           fi 
+ 
+          PUBLIC_URL="http://${FQDN}:${PORT}" 
+          HEALTH_URL="${PUBLIC_URL}/health" 
+          DOCS_URL="${PUBLIC_URL}/docs" 
+ 
+          echo "Endpoint público obtenido desde Azure:"           echo "$PUBLIC_URL"           echo "Health URL:"           echo "$HEALTH_URL"           echo "Docs URL:"           echo "$DOCS_URL" 
+ 
+          echo "Esperamos 30 segundos iniciales para que el endpoint quede disponible..."           sleep 30 
+ 
+          for i in {1..30}; do 
+            echo "Intento $i de 30..." 
+ 
+            HTTP_CODE=$(curl -sS -o health_response.txt -w "%{http_code}" \               --connect-timeout 5 \ 
+              --max-time 10 \ 
+              "$HEALTH_URL" || echo "000") 
+ 
+            echo "Código HTTP recibido: $HTTP_CODE" 
+ 
+            if [ "$HTTP_CODE" = "200" ]; then 
+              echo "ACI responde correctamente en /health."               echo "Respuesta:"               cat health_response.txt               echo "" 
+              echo "API pública: $PUBLIC_URL"               echo "Swagger UI: $DOCS_URL"               exit 0             fi 
+ 
+            echo "ACI todavía no responde. Esperando 10 segundos..."             sleep 10           done 
+ 
+          echo "La API no respondió a tiempo desde GitHub Actions."           echo "Última respuesta recibida:"           cat health_response.txt || true           echo "" 
+          echo "URL esperada: $PUBLIC_URL"           exit 1 
+to help you get started with Actions
+
+name: CI
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v4
+
+      # Runs a single command using the runners shell
+      - name: Run a one-line script
+        run: echo Hello, world!
+
+      # Runs a set of commands using the runners shell
+      - name: Run a multi-line script
+        run: |
+          echo Add other actions to build,
+          echo test, and deploy your project.
