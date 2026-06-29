@@ -33,7 +33,6 @@ env:
   REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
   DNS_LABEL: ${{ secrets.DNS_LABEL }}
   AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-  AZURE_BEARER_TOKEN: ${{ secrets.AZURE_BEARER_TOKEN }}
 
 jobs:
   build-test-push-deploy:
@@ -123,20 +122,37 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$AZURE_BEARER_TOKEN" ]; then
-            echo "ERROR: AZURE_BEARER_TOKEN esta vacio"
-            exit 1
-          fi
-
-          if [[ "$AZURE_BEARER_TOKEN" == Bearer* ]]; then
-            echo "ERROR: AZURE_BEARER_TOKEN no debe empezar por Bearer. El YAML ya anade Bearer en la cabecera HTTP."
+          if [ -z "${{ secrets.AZURE_CREDENTIALS }}" ]; then
+            echo "ERROR: AZURE_CREDENTIALS esta vacio"
             exit 1
           fi
 
           echo "Variables validadas correctamente."
 
       # ---------------------------------------------------------
-      # 7. Login en Azure Container Registry
+      # 7. Login en Azure y obtencion de token
+      # ---------------------------------------------------------
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get Azure access token
+        run: |
+          ACCESS_TOKEN=$(az account get-access-token \
+            --resource https://management.azure.com/ \
+            --query accessToken \
+            --output tsv)
+
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "ERROR: No se pudo obtener access token de Azure"
+            exit 1
+          fi
+
+          echo "AZURE_ACCESS_TOKEN=$ACCESS_TOKEN" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------
+      # 8. Login en Azure Container Registry
       # ---------------------------------------------------------
       - name: Login to Azure Container Registry
         run: |
@@ -145,14 +161,14 @@ jobs:
             --password-stdin
 
       # ---------------------------------------------------------
-      # 8. Construir imagen Docker
+      # 9. Construir imagen Docker
       # ---------------------------------------------------------
       - name: Build Docker image
         run: |
           docker build -t "$IMAGE_NAME:local" .
 
       # ---------------------------------------------------------
-      # 9. Probar contenedor localmente en GitHub Actions
+      # 10. Probar contenedor localmente en GitHub Actions
       # ---------------------------------------------------------
       - name: Smoke test Docker container
         run: |
@@ -179,7 +195,7 @@ jobs:
           docker rm iris-api-test
 
       # ---------------------------------------------------------
-      # 10. Etiquetar y subir imagen a ACR
+      # 11. Etiquetar y subir imagen a ACR
       # ---------------------------------------------------------
       - name: Tag and push image to ACR
         run: |
@@ -196,7 +212,7 @@ jobs:
           echo "IMAGE_LATEST=$IMAGE_LATEST" >> "$GITHUB_ENV"
 
       # ---------------------------------------------------------
-      # 11. Eliminar ACI anterior mediante Azure Management API
+      # 12. Eliminar ACI anterior mediante Azure Management API
       # ---------------------------------------------------------
       - name: Delete previous Azure Container Instance if exists
         run: |
@@ -206,7 +222,7 @@ jobs:
 
           HTTP_CODE=$(curl -sS -o delete_response.json -w "%{http_code}" \
             -X DELETE "$ACI_URL" \
-            -H "Authorization: Bearer ${AZURE_BEARER_TOKEN}" || echo "000")
+            -H "Authorization: Bearer ${AZURE_ACCESS_TOKEN}" || echo "000")
 
           echo "Codigo HTTP delete: $HTTP_CODE"
 
@@ -222,7 +238,7 @@ jobs:
           sleep 30
 
       # ---------------------------------------------------------
-      # 12. Generar JSON de despliegue de ACI
+      # 13. Generar JSON de despliegue de ACI
       # ---------------------------------------------------------
       - name: Generate ACI deployment JSON
         run: |
@@ -285,7 +301,7 @@ jobs:
           PY
 
       # ---------------------------------------------------------
-      # 13. Desplegar ACI mediante Azure Management API
+      # 14. Desplegar ACI mediante Azure Management API
       # ---------------------------------------------------------
       - name: Deploy to Azure Container Instances via REST
         run: |
@@ -294,7 +310,7 @@ jobs:
           echo "Desplegando ACI mediante Azure Management API..."
           HTTP_CODE=$(curl -sS -o deploy_response.json -w "%{http_code}" \
             -X PUT "$ACI_URL" \
-            -H "Authorization: Bearer ${AZURE_BEARER_TOKEN}" \
+            -H "Authorization: Bearer ${AZURE_ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
             --data-binary @deployment.json || echo "000")
 
@@ -309,7 +325,7 @@ jobs:
           fi
 
       # ---------------------------------------------------------
-      # 14. Esperar a que ACI quede provisionado
+      # 15. Esperar a que ACI quede provisionado
       # ---------------------------------------------------------
       - name: Wait for ACI provisioning
         run: |
@@ -321,7 +337,7 @@ jobs:
             echo "Comprobacion de provisioning $i de 30..."
             HTTP_CODE=$(curl -sS -o aci_status.json -w "%{http_code}" \
               -X GET "$ACI_URL" \
-              -H "Authorization: Bearer ${AZURE_BEARER_TOKEN}" || echo "000")
+              -H "Authorization: Bearer ${AZURE_ACCESS_TOKEN}" || echo "000")
 
             if [ "$HTTP_CODE" = "200" ]; then
               PROVISIONING_STATE=$(python - <<'PY'
@@ -355,7 +371,7 @@ jobs:
           exit 1
 
       # ---------------------------------------------------------
-      # 15. Esperar y probar endpoint desplegado
+      # 16. Esperar y probar endpoint desplegado
       # ---------------------------------------------------------
       - name: Wait and test deployed ACI endpoint
         run: |
@@ -365,7 +381,7 @@ jobs:
 
           curl -sS -o aci_final.json \
             -X GET "$ACI_URL" \
-            -H "Authorization: Bearer ${AZURE_BEARER_TOKEN}"
+            -H "Authorization: Bearer ${AZURE_ACCESS_TOKEN}"
 
           FQDN=$(python - <<'PY'
           import json
