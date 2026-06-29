@@ -92,6 +92,8 @@ jobs:
         run: |
           echo "Validando variables necesarias..."
 
+          MISSING_AZURE_AUTH=""
+
           if [ -z "$RESOURCE_GROUP" ]; then
             echo "ERROR: RESOURCE_GROUP esta vacio"
             exit 1
@@ -127,8 +129,15 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$AZURE_CREDENTIALS" ] && { [ -z "$AZURE_CLIENT_ID" ] || [ -z "$AZURE_TENANT_ID" ] || [ -z "$AZURE_SUBSCRIPTION_ID" ]; }; then
-            echo "ERROR: Debes definir AZURE_CREDENTIALS o bien AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID"
+          if [ -z "$AZURE_CREDENTIALS" ]; then
+            [ -z "$AZURE_CLIENT_ID" ] && MISSING_AZURE_AUTH="${MISSING_AZURE_AUTH} AZURE_CLIENT_ID"
+            [ -z "$AZURE_TENANT_ID" ] && MISSING_AZURE_AUTH="${MISSING_AZURE_AUTH} AZURE_TENANT_ID"
+            [ -z "$AZURE_SUBSCRIPTION_ID" ] && MISSING_AZURE_AUTH="${MISSING_AZURE_AUTH} AZURE_SUBSCRIPTION_ID"
+          fi
+
+          if [ -z "$AZURE_CREDENTIALS" ] && [ -n "$MISSING_AZURE_AUTH" ]; then
+            echo "ERROR: Falta configurar autenticacion de Azure."
+            echo "Define AZURE_CREDENTIALS o, para OIDC, define:${MISSING_AZURE_AUTH}"
             exit 1
           fi
 
