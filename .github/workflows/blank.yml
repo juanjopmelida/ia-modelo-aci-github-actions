@@ -37,7 +37,6 @@ env:
   AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
   AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-  AZURE_BEARER_TOKEN: ${{ secrets.AZURE_BEARER_TOKEN }}
 
 jobs:
   build-test-push-deploy:
@@ -127,45 +126,9 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$AZURE_CREDENTIALS" ] && [ -z "$AZURE_BEARER_TOKEN" ] && { [ -z "$AZURE_CLIENT_ID" ] || [ -z "$AZURE_TENANT_ID" ] || [ -z "$AZURE_CLIENT_SECRET" ]; }; then
-            echo "ERROR: Debes definir AZURE_CREDENTIALS, o bien AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_CLIENT_SECRET, o bien AZURE_BEARER_TOKEN"
+          if [ -z "$AZURE_CREDENTIALS" ] && { [ -z "$AZURE_CLIENT_ID" ] || [ -z "$AZURE_TENANT_ID" ] || [ -z "$AZURE_CLIENT_SECRET" ]; }; then
+            echo "ERROR: Debes definir AZURE_CREDENTIALS o bien AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_CLIENT_SECRET"
             exit 1
-          fi
-
-          if [ -z "$AZURE_CREDENTIALS" ] && { [ -z "$AZURE_CLIENT_ID" ] || [ -z "$AZURE_TENANT_ID" ] || [ -z "$AZURE_CLIENT_SECRET" ]; } && [ -n "$AZURE_BEARER_TOKEN" ]; then
-            python - <<'PY'
-          import base64
-          import json
-          import os
-          import sys
-          import time
-
-          token = os.environ["AZURE_BEARER_TOKEN"]
-          parts = token.split(".")
-
-          if len(parts) < 2:
-              print("ERROR: AZURE_BEARER_TOKEN no tiene formato JWT valido")
-              sys.exit(1)
-
-          payload = parts[1]
-          payload += "=" * (-len(payload) % 4)
-
-          try:
-              claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
-          except Exception:
-              print("ERROR: No se pudo decodificar AZURE_BEARER_TOKEN")
-              sys.exit(1)
-
-          exp = claims.get("exp")
-          if not exp:
-              print("ERROR: AZURE_BEARER_TOKEN no contiene claim exp")
-              sys.exit(1)
-
-          now = int(time.time())
-          if int(exp) <= now:
-              print("ERROR: AZURE_BEARER_TOKEN esta caducado. Define AZURE_CREDENTIALS o AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_CLIENT_SECRET.")
-              sys.exit(1)
-          PY
           fi
 
           echo "Variables validadas correctamente."
@@ -189,7 +152,7 @@ jobs:
           client-secret: ${{ env.AZURE_CLIENT_SECRET }}
 
       - name: Get Azure access token
-        if: ${{ env.AZURE_CREDENTIALS != '' || (env.AZURE_CLIENT_ID != '' && env.AZURE_TENANT_ID != '' && env.AZURE_CLIENT_SECRET != '') }}
+        if: ${{ always() }}
         run: |
           ACCESS_TOKEN=$(az account get-access-token \
             --resource https://management.azure.com/ \
@@ -202,11 +165,6 @@ jobs:
           fi
 
           echo "AZURE_ACCESS_TOKEN=$ACCESS_TOKEN" >> "$GITHUB_ENV"
-
-      - name: Use provided bearer token
-        if: ${{ env.AZURE_CREDENTIALS == '' && (env.AZURE_CLIENT_ID == '' || env.AZURE_TENANT_ID == '' || env.AZURE_CLIENT_SECRET == '') && env.AZURE_BEARER_TOKEN != '' }}
-        run: |
-          echo "AZURE_ACCESS_TOKEN=$AZURE_BEARER_TOKEN" >> "$GITHUB_ENV"
 
       # ---------------------------------------------------------
       # 8. Login en Azure Container Registry
