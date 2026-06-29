@@ -134,7 +134,7 @@ jobs:
           echo "Variables validadas correctamente."
 
       # ---------------------------------------------------------
-      # 7. Login en Azure y obtencion de token
+      # 7. Login en Azure
       # ---------------------------------------------------------
       - name: Azure login
         if: ${{ env.AZURE_CREDENTIALS != '' }}
@@ -150,21 +150,6 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           client-secret: ${{ env.AZURE_CLIENT_SECRET }}
-
-      - name: Get Azure access token
-        if: ${{ always() }}
-        run: |
-          ACCESS_TOKEN=$(az account get-access-token \
-            --resource https://management.azure.com/ \
-            --query accessToken \
-            --output tsv)
-
-          if [ -z "$ACCESS_TOKEN" ]; then
-            echo "ERROR: No se pudo obtener access token de Azure"
-            exit 1
-          fi
-
-          echo "AZURE_ACCESS_TOKEN=$ACCESS_TOKEN" >> "$GITHUB_ENV"
 
       # ---------------------------------------------------------
       # 8. Login en Azure Container Registry
@@ -235,9 +220,19 @@ jobs:
 
           echo "Eliminando ACI anterior si existe..."
 
+          ACCESS_TOKEN=$(az account get-access-token \
+            --resource https://management.azure.com/ \
+            --query accessToken \
+            --output tsv)
+
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "ERROR: No se pudo obtener access token de Azure para el borrado"
+            exit 1
+          fi
+
           HTTP_CODE=$(curl -sS -o delete_response.json -w "%{http_code}" \
             -X DELETE "$ACI_URL" \
-            -H "Authorization: Bearer ${AZURE_ACCESS_TOKEN}" || echo "000")
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" || echo "000")
 
           echo "Codigo HTTP delete: $HTTP_CODE"
 
@@ -323,9 +318,20 @@ jobs:
           ACI_URL="https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.ContainerInstance/containerGroups/${CONTAINER_NAME}?api-version=2023-05-01"
 
           echo "Desplegando ACI mediante Azure Management API..."
+
+          ACCESS_TOKEN=$(az account get-access-token \
+            --resource https://management.azure.com/ \
+            --query accessToken \
+            --output tsv)
+
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "ERROR: No se pudo obtener access token de Azure para el despliegue"
+            exit 1
+          fi
+
           HTTP_CODE=$(curl -sS -o deploy_response.json -w "%{http_code}" \
             -X PUT "$ACI_URL" \
-            -H "Authorization: Bearer ${AZURE_ACCESS_TOKEN}" \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
             --data-binary @deployment.json || echo "000")
 
@@ -350,9 +356,20 @@ jobs:
 
           for i in {1..30}; do
             echo "Comprobacion de provisioning $i de 30..."
+
+            ACCESS_TOKEN=$(az account get-access-token \
+              --resource https://management.azure.com/ \
+              --query accessToken \
+              --output tsv)
+
+            if [ -z "$ACCESS_TOKEN" ]; then
+              echo "ERROR: No se pudo obtener access token de Azure durante la espera de provisioning"
+              exit 1
+            fi
+
             HTTP_CODE=$(curl -sS -o aci_status.json -w "%{http_code}" \
               -X GET "$ACI_URL" \
-              -H "Authorization: Bearer ${AZURE_ACCESS_TOKEN}" || echo "000")
+              -H "Authorization: Bearer ${ACCESS_TOKEN}" || echo "000")
 
             if [ "$HTTP_CODE" = "200" ]; then
               PROVISIONING_STATE=$(python - <<'PY'
@@ -394,9 +411,19 @@ jobs:
 
           echo "Obteniendo FQDN real de ACI desde Azure..."
 
+          ACCESS_TOKEN=$(az account get-access-token \
+            --resource https://management.azure.com/ \
+            --query accessToken \
+            --output tsv)
+
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "ERROR: No se pudo obtener access token de Azure para consultar el FQDN"
+            exit 1
+          fi
+
           curl -sS -o aci_final.json \
             -X GET "$ACI_URL" \
-            -H "Authorization: Bearer ${AZURE_ACCESS_TOKEN}"
+            -H "Authorization: Bearer ${ACCESS_TOKEN}"
 
           FQDN=$(python - <<'PY'
           import json
