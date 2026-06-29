@@ -37,6 +37,7 @@ env:
   AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
   AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  AZURE_BEARER_TOKEN: ${{ secrets.AZURE_BEARER_TOKEN }}
 
 jobs:
   build-test-push-deploy:
@@ -126,8 +127,8 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$AZURE_CREDENTIALS" ] && { [ -z "$AZURE_CLIENT_ID" ] || [ -z "$AZURE_TENANT_ID" ] || [ -z "$AZURE_CLIENT_SECRET" ]; }; then
-            echo "ERROR: Debes definir AZURE_CREDENTIALS o bien AZURE_CLIENT_ID, AZURE_TENANT_ID y AZURE_CLIENT_SECRET"
+          if [ -z "$AZURE_CREDENTIALS" ] && [ -z "$AZURE_BEARER_TOKEN" ] && { [ -z "$AZURE_CLIENT_ID" ] || [ -z "$AZURE_TENANT_ID" ] || [ -z "$AZURE_CLIENT_SECRET" ]; }; then
+            echo "ERROR: Debes definir AZURE_CREDENTIALS, o bien AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_CLIENT_SECRET, o bien AZURE_BEARER_TOKEN"
             exit 1
           fi
 
@@ -143,7 +144,7 @@ jobs:
           creds: ${{ env.AZURE_CREDENTIALS }}
 
       - name: Azure login with service principal fields
-        if: ${{ env.AZURE_CREDENTIALS == '' }}
+        if: ${{ env.AZURE_CREDENTIALS == '' && env.AZURE_BEARER_TOKEN == '' }}
         uses: azure/login@v2
         with:
           client-id: ${{ env.AZURE_CLIENT_ID }}
@@ -152,6 +153,7 @@ jobs:
           client-secret: ${{ env.AZURE_CLIENT_SECRET }}
 
       - name: Get Azure access token
+        if: ${{ env.AZURE_BEARER_TOKEN == '' }}
         run: |
           ACCESS_TOKEN=$(az account get-access-token \
             --resource https://management.azure.com/ \
@@ -164,6 +166,11 @@ jobs:
           fi
 
           echo "AZURE_ACCESS_TOKEN=$ACCESS_TOKEN" >> "$GITHUB_ENV"
+
+      - name: Use provided bearer token
+        if: ${{ env.AZURE_BEARER_TOKEN != '' }}
+        run: |
+          echo "AZURE_ACCESS_TOKEN=$AZURE_BEARER_TOKEN" >> "$GITHUB_ENV"
 
       # ---------------------------------------------------------
       # 8. Login en Azure Container Registry
